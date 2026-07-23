@@ -31,7 +31,7 @@ jobs:
       TEST_DATABASE_URL: postgresql://raguser:ragpass@localhost:5432/ragdb_test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The OCR ingestion path shells out to the `tesseract` binary; without it
       # the image tests skip instead of running.
@@ -41,7 +41,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends tesseract-ocr
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
