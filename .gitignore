@@ -7,3 +7,6 @@ qdrant_data/
 
 # macOS
 .DS_Store
+
+# uv lockfile
+uv.lock
