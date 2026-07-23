@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vault — your private reading room</title>
+    <meta name="theme-color" content="#093530" />
+
+    <!--
+      The loading screen, inline and unbundled, so the very first paint needs
+      nothing off the network: no JS module, no stylesheet, no webfont. It is
+      the same room as the sign-in aside — Vault's deep-green field and faint
+      brass ledger rules — so whichever screen follows continues it rather than
+      replacing it.
+
+      It sits OUTSIDE #root, as a fixed overlay driven by the inline script
+      below, because React clears #root when it mounts — which would wipe the
+      canvas mid-animation. React renders the app underneath and calls
+      window.__vaultBoot.finish() when the session check resolves; the motes
+      scatter and the overlay fades off the real UI.
+    -->
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+      .boot {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        /* Field + ambient ledger rules: the same values as .auth__aside. */
+        background: repeating-linear-gradient(
+            transparent 0 38px,
+            rgba(199, 154, 99, 0.07) 38px 39px
+          ),
+          #093530;
+        transition: opacity 420ms ease;
+      }
+      .boot--out {
+        opacity: 0;
+        pointer-events: none;
+      }
+      /* The pool of lamplight the dust is visible in. Static: the motes carry
+         the motion now, and two competing animations read as noise. */
+      .boot__glow {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(
+          ellipse 58% 42% at 50% 44%,
+          rgba(199, 154, 99, 0.18),
+          transparent 72%
+        );
+      }
+      .boot__motes {
+        position: absolute;
+        inset: 0;
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      .boot__brand {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.55rem;
+      }
+      .boot__mark {
+        font-family: "Spectral", Georgia, serif;
+        font-weight: 600;
+        font-size: clamp(2.6rem, 7vw, 3.5rem);
+        line-height: 1;
+        color: #c79a63;
+      }
+      .boot__name {
+        font-family: "Spectral", Georgia, serif;
+        font-weight: 600;
+        font-size: 1.15rem;
+        letter-spacing: 0.01em;
+        color: #fff;
+      }
+      /* A ledger rule drawing itself, rather than a chunky progress bar. */
+      .boot__rule {
+        margin-top: 0.85rem;
+        width: min(220px, 44vw);
+        height: 2px;
+        border-radius: 2px;
+        background: rgba(199, 154, 99, 0.16);
+        overflow: hidden;
+      }
+      .boot__fill {
+        display: block;
+        height: 100%;
+        width: 0;
+        border-radius: 2px;
+        background: linear-gradient(90deg, rgba(199, 154, 99, 0.45), #d8ab72);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        /* No gathering, no scatter — the rule still reports progress. */
+        .boot__motes {
+          display: none;
+        }
+      }
+    </style>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!--
+      Loaded without blocking the render: a stylesheet in the head holds the
+      first paint until it arrives, which would leave the loading screen itself
+      waiting on fonts.googleapis.com — the one thing it must never do. The
+      `media` swap applies it as soon as it lands, and the faces already carry
+      display=swap, so text paints in Georgia and upgrades to Spectral.
+    -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet"
+      />
+      <!-- Nothing can retire the overlay without JS, so never raise it. -->
+      <style>
+        .boot {
+          display: none;
+        }
+      </style>
+    </noscript>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <div id="boot" class="boot" role="status" aria-label="Loading Vault">
+      <div class="boot__glow"></div>
+      <canvas class="boot__motes" aria-hidden="true"></canvas>
+      <div class="boot__brand">
+        <span class="boot__mark">§</span>
+        <span class="boot__name">Vault</span>
+        <div class="boot__rule">
+          <i class="boot__fill" id="boot-fill"></i>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      /*
+        Brass dust drawing into the lamplight while Vault loads, then scattering
+        when the room opens. Deliberately vanilla and inline: it has to run
+        before the bundle exists, which is the whole point of the screen.
+
+        The rule reports real milestones — script parsed, app module executed,
+        React mounted, session resolved — not a timer pretending to be one. It
+        eases toward each and holds there, so a slow /auth/me looks like waiting
+        (which it is) rather than progress that never lands.
+      */
+      (function () {
+        var boot = document.getElementById("boot");
+        var fill = document.getElementById("boot-fill");
+        var canvas = boot.querySelector(".boot__motes");
+        var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+        // The minimum is here because a warm cache would otherwise flash the
+        // whole sequence in ~80ms and read as a glitch. The rest is the beat
+        // the sequence needs to land. Tune them here; nothing else assumes them.
+        var MIN_MS = 900; // shortest the screen is ever up
+        var HOLD_MS = 140; // pause on a completed rule before the dust goes
+        var FADE_DELAY = 260; // into the scatter before the room shows through
+        var FADE_MS = 440; // overlay fade — matches the CSS transition
+        var FAILSAFE_MS = 10000;
+        var started = Date.now();
+
+        var target = 0;
+        var shown = 0;
+        var phase = "gather"; // gather -> scatter
+        var landing = false; // finish() called; the rule is running to 100%
+        var done = false;
+        var motes = [];
+        var ctx = canvas.getContext("2d");
+        var w = 0;
+        var h = 0;
+        var reach = 0;
+
+        function size() {
+          var dpr = Math.min(window.devicePixelRatio || 1, 2);
+          w = canvas.clientWidth;
+          h = canvas.clientHeight;
+          canvas.width = Math.round(w * dpr);
+          canvas.height = Math.round(h * dpr);
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          reach = Math.sqrt(w * w + h * h) / 2; // corner-to-centre
+        }
+
+        function seed() {
+          // Scale to the viewport so a phone doesn't get a desktop's dust.
+          var count = Math.max(34, Math.min(120, Math.round((w * h) / 14000)));
+          motes = [];
+          for (var i = 0; i < count; i++) {
+            motes.push({
+              angle: Math.random() * Math.PI * 2,
+              // Start beyond the edges and drift in.
+              radius: 0.55 + Math.random() * 0.85,
+              rest: 0.055 + Math.random() * 0.11, // the ring they settle into
+              drift: (Math.random() - 0.5) * 0.5, // slow swirl
+              size: 0.5 + Math.random() * 1.7,
+              alpha: 0.2 + Math.random() * 0.55,
+              speed: 0,
+              fade: 1,
+            });
+          }
+        }
+
+        function draw() {
+          ctx.clearRect(0, 0, w, h);
+          var cx = w / 2;
+          var cy = h * 0.44; // the centre of the light pool, not of the page
+          for (var i = 0; i < motes.length; i++) {
+            var m = motes[i];
+            var x = cx + Math.cos(m.angle) * m.radius * reach;
+            var y = cy + Math.sin(m.angle) * m.radius * reach;
+            ctx.globalAlpha = Math.max(0, m.alpha * m.fade);
+            ctx.beginPath();
+            ctx.arc(x, y, m.size, 0, Math.PI * 2);
+            ctx.fillStyle = "#c79a63";
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        var last = 0;
+        function frame(now) {
+          var dt = last ? Math.min((now - last) / 16.67, 3) : 1; // in frames
+          last = now;
+
+          if (target === 1) {
+            // Loading is genuinely done (target only hits 1 in finish, after the
+            // minimum): sweep the rule decisively to full instead of crawling
+            // the last percent asymptotically. This is what cues the scatter.
+            shown = Math.min(1, shown + 0.045 * dt);
+          } else {
+            // Ease toward each milestone and hold there — a slow /auth/me then
+            // looks like waiting, not like progress that never lands.
+            shown += (target - shown) * 0.08 * dt;
+            if (Math.abs(target - shown) < 0.002) shown = target;
+          }
+          fill.style.width = (shown * 100).toFixed(2) + "%";
+
+          // The scatter is triggered BY the rule finishing, not by a timer
+          // racing it — so the dust never explodes off a half-drawn rule.
+          if (landing && phase === "gather" && shown === 1) {
+            phase = "scatter";
+            window.setTimeout(leave, reduced ? 0 : HOLD_MS);
+          }
+
+          if (!reduced) {
+            for (var i = 0; i < motes.length; i++) {
+              var m = motes[i];
+              m.angle += m.drift * 0.004 * dt;
+              if (phase === "gather") {
+                m.radius += (m.rest - m.radius) * 0.022 * dt;
+              } else {
+                m.speed += 0.0016 * dt; // accelerate outward
+                m.radius += m.speed * dt;
+                m.fade -= 0.016 * dt;
+              }
+            }
+            draw();
+          }
+
+          if (done) return; // overlay is on its way out; stop the loop
+          requestAnimationFrame(frame);
+        }
+
+        // Fade the overlay off the app underneath, then remove it. Guarded so
+        // the repeated finish() of React StrictMode can't fire it twice.
+        function leave() {
+          if (done) return;
+          done = true;
+          window.setTimeout(function () {
+            boot.classList.add("boot--out");
+            window.setTimeout(function () {
+              boot.remove();
+            }, FADE_MS);
+          }, reduced ? 0 : FADE_DELAY);
+        }
+
+        function step(value) {
+          target = Math.max(target, Math.min(value, 1)); // never walk backwards
+        }
+
+        function finish() {
+          if (landing) return;
+          landing = true;
+          var wait = Math.max(0, MIN_MS - (Date.now() - started));
+          // Drive the rule to full; the frame loop takes it from there once it
+          // actually reaches 100%.
+          window.setTimeout(function () {
+            step(1);
+          }, wait);
+        }
+
+        window.__vaultBoot = { step: step, finish: finish };
+
+        size();
+        seed();
+        window.addEventListener("resize", function () {
+          size();
+          seed();
+        });
+        requestAnimationFrame(frame);
+        step(0.12); // the document itself is up
+
+        // If the app never reports in — a chunk that 404s, a hung request — the
+        // overlay must not trap the page behind it forever.
+        window.setTimeout(function () {
+          if (document.body.contains(boot)) finish();
+        }, FAILSAFE_MS);
+      })();
+    </script>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

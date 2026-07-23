@@ -1,0 +1,69 @@
+# Local development services:
+#   * postgres — the application database (users, conversations, messages,
+#     revoked tokens). See rag_app/auth/db.py.
+#   * minio    — per-user object storage for chat snapshots and uploaded
+#     document originals (see rag_app/storage.py).
+#
+#   docker compose up -d
+#
+# Postgres: localhost:5434  -> DATABASE_URL=postgresql://raguser:ragpass@localhost:5434/ragdb
+#   (host port 5434, not 5432, so it never clashes with a Postgres already
+#    installed on the host; inside the container it still listens on 5432)
+# Console:  http://localhost:9001 (minioadmin / minioadmin)
+# API:      http://localhost:9000  -> MINIO_ENDPOINT=localhost:9000
+#
+# Set STORAGE_ENABLED=true in .env to turn MinIO on. All credentials below are
+# development defaults, safe only because they listen on localhost; a deployed
+# stack needs real credentials (and MINIO_SECURE=true for MinIO).
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: rag-postgres
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: raguser
+      POSTGRES_PASSWORD: ragpass
+      POSTGRES_DB: ragdb
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raguser -d ragdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: rag-minio
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ./data/minio:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  # Creates the bucket once MinIO is up, then exits. The app also creates the
+  # bucket on first use, so this only makes it exist before the first upload.
+  createbucket:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/rag-storage &&
+      echo 'Bucket rag-storage is ready.'
+      "

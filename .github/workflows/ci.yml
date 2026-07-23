@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # The suite runs against a real Postgres (conftest creates a `ragdb_test`
+    # database inside it). Health-check so steps only start once it accepts
+    # connections.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: raguser
+          POSTGRES_PASSWORD: ragpass
+          POSTGRES_DB: ragdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U raguser -d ragdb"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      TEST_DATABASE_URL: postgresql://raguser:ragpass@localhost:5432/ragdb_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The OCR ingestion path shells out to the `tesseract` binary; without it
+      # the image tests skip instead of running.
+      - name: Install Tesseract
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv venv --python 3.13
+
+      - name: Install project (with dev deps)
+        run: uv pip install -e ".[dev]"
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest -q
